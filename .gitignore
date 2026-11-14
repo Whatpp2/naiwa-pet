@@ -1,0 +1,4 @@
+build/
+*.keystore
+*.apk
+github_token.txt
