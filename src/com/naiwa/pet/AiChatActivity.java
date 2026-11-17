@@ -42,7 +42,7 @@ public class AiChatActivity extends Activity {
         top.setOrientation(LinearLayout.HORIZONTAL);
         top.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = new TextView(this);
-        title.setText("🤖 奶蛙 AI 对话");
+        title.setText("🤖 p1 AI 对话");
         title.setTextColor(0xFFFFEB99);
         title.setTextSize(17);
         Button desk = new Button(this);
@@ -73,7 +73,7 @@ public class AiChatActivity extends Activity {
         bottom.setOrientation(LinearLayout.HORIZONTAL);
         bottom.setGravity(Gravity.CENTER_VERTICAL);
         input = new EditText(this);
-        input.setHint("跟奶蛙说点啥…");
+        input.setHint("跟p1说点啥…");
         input.setHintTextColor(0xFF777777);
         input.setTextColor(0xFFFFFFFF);
         input.setSingleLine(true);
@@ -86,7 +86,7 @@ public class AiChatActivity extends Activity {
         root.addView(bottom);
 
         setContentView(root);
-        append("奶蛙: 呱～我是奶蛙！点右上角⚙️填钥匙就能聊天。想回桌面点「💬桌面」，长按奶蛙菜单里也有「💬桌面聊天」。");
+        append("p1: 呱～我是p1！点右上角⚙️填钥匙就能聊天。想回桌面点「💬桌面」，长按p1菜单里也有「💬桌面聊天」。");
     }
 
     private void send() {
@@ -95,20 +95,20 @@ public class AiChatActivity extends Activity {
         append("你: " + q);
         input.setText("");
         if (apiKey.trim().isEmpty()) {
-            append("奶蛙: 先点右上角⚙️填写 API Key 呱～");
+            append("p1: 先点右上角⚙️填写 API Key 呱～");
             return;
         }
         if (Math.random() < 0.30) {
-            append("奶蛙: " + AiClient.randomReject());
+            append("p1: " + AiClient.randomReject());
             return;
         }
         waiting = true;
-        append("奶蛙: （思考中…）");
+        append("p1: （思考中…）");
         new Thread(() -> {
             final String reply = AiClient.call(apiKey, baseUrl, model, q);
             runOnUiThread(() -> {
                 removeLastLine();
-                append("奶蛙: " + reply);
+                append("p1: " + reply);
                 waiting = false;
             });
         }).start();
@@ -148,7 +148,7 @@ public class AiChatActivity extends Activity {
                     prefs.edit().putString("key", apiKey)
                             .putString("url", baseUrl)
                             .putString("model", model).apply();
-                    append("奶蛙: 设置已保存呱～模型=" + model + "，可留在这里聊，或点💬桌面去桌面聊。");
+                    append("p1: 设置已保存呱～模型=" + model + "，可留在这里聊，或点💬桌面去桌面聊。");
                 })
                 .setNegativeButton("取消", null)
                 .show();

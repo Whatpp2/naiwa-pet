@@ -13,6 +13,7 @@ import android.content.pm.ServiceInfo;
 import android.graphics.PixelFormat;
 import android.graphics.drawable.GradientDrawable;
 import android.media.AudioAttributes;
+import android.media.MediaPlayer;
 import android.media.SoundPool;
 import android.os.Build;
 import android.os.Handler;
@@ -39,33 +40,51 @@ import java.util.List;
 import java.util.Random;
 
 /**
- * 悬浮窗服务：管理奶蛙（最多 6 只，可含 0.3 倍小个体）、按键移动、菜单、
- * 随机事件、交配产仔、死亡 5 秒后留下骷髅头（可清理/复活）。
+ * 悬浮窗服务：管理p1（最多 6 只，可含 0.3 倍小个体）、按键移动、菜单、
+ * 随机事件、交配产仔、死亡 5 秒后移除。
  */
 public class PetService extends Service {
 
     private static final String CH = "pet";
     private static final long LONG_PRESS_MS = 4000;
-    private static final int MAX_PETS = 6;
+    private static final int MAX_PETS = 16;
     private static final int S_CROAK = 10;
 
     private WindowManager wm;
+
+    /** Android 8.0 以下没有 TYPE_APPLICATION_OVERLAY，用 TYPE_PHONE（逍遥模拟器 5.1/7.1 必须） */
+    static int overlayType() {
+        return Build.VERSION.SDK_INT >= 26
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_PHONE;
+    }
+
     private int petW, petH, screenW, screenH;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Random rnd = new Random();
 
     private final List<Inst> pets = new ArrayList<>();
-    private final List<Skull> skulls = new ArrayList<>();
 
     private LinearLayout menu;
     private WindowManager.LayoutParams menuParams;
     private Inst menuTarget;
 
-    private LinearLayout skullMenu;
-    private WindowManager.LayoutParams skullMenuParams;
-
     private SoundPool sp;
+    private MediaPlayer yujieBgm;
+    private boolean yujieBgmOn = false;
+    private MediaPlayer yujieVoice;
+    private MediaPlayer stutterPlayer;
+    private final Runnable yujieVoiceStop = new Runnable() {
+        public void run() {
+            try {
+                if (yujieVoice != null) {
+                    if (yujieVoice.isPlaying()) yujieVoice.pause();
+                    applyParams(yujieVoice, 1f, 1f);
+                }
+            } catch (Exception ignore) {}
+        }
+    };
     private final int[] soundIds = new int[11];
     private android.content.SharedPreferences prefs;
     private View chatInput;
@@ -95,12 +114,10 @@ public class PetService extends Service {
             showMenu(Inst.this);
         };
         Runnable deathTask;
-    }
-
-    private class Skull {
-        SkullView view;
-        WindowManager.LayoutParams params;
-        float sizeScale = 1f;
+        Runnable hallucinationTask;
+        boolean rampaging;
+        long lastRampageAt = 0;
+        Runnable giantVoiceTask;
     }
 
     private static class Dropping {
@@ -134,23 +151,11 @@ public class PetService extends Service {
     public void onCreate() {
         super.onCreate();
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
-        if (Build.VERSION.SDK_INT >= 30) {
-            android.graphics.Rect b = wm.getCurrentWindowMetrics().getBounds();
-            screenW = b.width();
-            screenH = b.height();
-        } else {
-            DisplayMetrics dm = getResources().getDisplayMetrics();
-            screenW = dm.widthPixels;
-            screenH = dm.heightPixels;
-        }
-        density = getResources().getDisplayMetrics().density;
-        scaledDensity = getResources().getDisplayMetrics().scaledDensity;
-        petW = dp(200);
-        petH = dp(220);
+        computeMetrics();
         prefs = getSharedPreferences("naiwa_ai", MODE_PRIVATE);
         diag("onCreate screenW=" + screenW + " screenH=" + screenH + " petW=" + petW
                 + " density=" + density + " scaledDensity=" + scaledDensity);
-        startForegroundNow();
+        try { startForegroundNow(); } catch (Throwable t) { diag("startForeground fail: " + t); }
         initSound();
         spawnPet(screenW - petW - dp(12), (int) (screenH * 0.28f), 1f).view.playSpawn();
         scheduleRandom();
@@ -163,15 +168,30 @@ public class PetService extends Service {
             ch.setShowBadge(false);
             nm.createNotificationChannel(ch);
         }
+        // FLAG_IMMUTABLE 是 API 23+，低版本传它会被 PendingIntent.checkFlags 判为非法参数 → 崩溃
+        int piFlags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= 23) piFlags |= PendingIntent.FLAG_IMMUTABLE;
         PendingIntent pi = PendingIntent.getActivity(this, 0,
-                new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
-        Notification n = new Notification.Builder(this, CH)
-                .setContentTitle("奶蛙桌宠")
-                .setContentText("奶蛙正在屏幕上陪着你（长按打开菜单）")
-                .setSmallIcon(android.R.drawable.ic_menu_compass)
-                .setOngoing(true)
-                .setContentIntent(pi)
-                .build();
+                new Intent(this, MainActivity.class), piFlags);
+        Notification n;
+        if (Build.VERSION.SDK_INT >= 26) {
+            n = new Notification.Builder(this, CH)
+                    .setContentTitle("p1桌宠")
+                    .setContentText("p1正在屏幕上陪着你（长按打开菜单）")
+                    .setSmallIcon(android.R.drawable.ic_menu_compass)
+                    .setOngoing(true)
+                    .setContentIntent(pi)
+                    .build();
+        } else {
+            // Android 8.0 以下没有 NotificationChannel 构造
+            n = new Notification.Builder(this)
+                    .setContentTitle("p1桌宠")
+                    .setContentText("p1正在屏幕上陪着你（长按打开菜单）")
+                    .setSmallIcon(android.R.drawable.ic_menu_compass)
+                    .setOngoing(true)
+                    .setContentIntent(pi)
+                    .build();
+        }
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         } else {
@@ -203,6 +223,40 @@ public class PetService extends Service {
         if (id != 0) sp.play(id, 0.85f, 0.85f, 0, 0, 1f);
     }
 
+    /** 按当前屏幕重新计算尺寸（适配不同尺寸/比例/DPI/折叠屏） */
+    private void computeMetrics() {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            android.graphics.Rect b = wm.getCurrentWindowMetrics().getBounds();
+            screenW = b.width();
+            screenH = b.height();
+        } else {
+            DisplayMetrics dm = getResources().getDisplayMetrics();
+            screenW = dm.widthPixels;
+            screenH = dm.heightPixels;
+        }
+        density = getResources().getDisplayMetrics().density;
+        scaledDensity = getResources().getDisplayMetrics().scaledDensity;
+        int maxW = Math.max(1, (int) (screenW * 0.42f));
+        int maxH = Math.max(1, (int) (screenH * 0.46f));
+        petW = Math.max(dp(80), Math.min(dp(200), maxW));
+        petH = Math.max(dp(90), Math.min(dp(220), maxH));
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        computeMetrics();
+        for (Inst inst : new ArrayList<>(pets)) {
+            int w = Math.round(petW * inst.sizeScale);
+            int h = Math.round(petH * inst.sizeScale);
+            inst.params.width = w;
+            inst.params.height = h;
+            inst.params.x = clamp(inst.params.x, 0, Math.max(0, screenW - w));
+            inst.params.y = clamp(inst.params.y, 0, Math.max(0, screenH - h));
+            try { wm.updateViewLayout(inst.view, inst.params); } catch (Exception ignore) {}
+        }
+    }
+
     private int dp(float v) {
         return Math.round(v * density);
     }
@@ -227,6 +281,10 @@ public class PetService extends Service {
 
     // ---------- 生成宠物 ----------
     private Inst spawnPet(int x, int y, float sizeScale) {
+        return spawnPet(x, y, sizeScale, "naiwa");
+    }
+
+    private Inst spawnPet(int x, int y, float sizeScale, String role) {
         hideRestartButton();
         final Inst inst = new Inst();
         inst.sizeScale = sizeScale;
@@ -235,6 +293,7 @@ public class PetService extends Service {
         int h = Math.round(petH * sizeScale);
 
         PetView v = new PetView(this);
+        v.setRole(role);
         v.setListener(new PetView.Listener() {
             @Override public void playSound(int type) {
                 PetService.this.playSound(type);
@@ -249,16 +308,16 @@ public class PetService extends Service {
                 spawnDropping(who, type);
             }
             @Override public void onThunderDied(PetView who) {
-                startAshSkull(who);
+                handler.post(() -> removePet(who));
             }
             @Override public void onAgeDied(PetView who) {
-                startAgeSkull(who);
+                handler.post(() -> removePet(who));
             }
         });
 
         WindowManager.LayoutParams p = new WindowManager.LayoutParams(
                 w, h,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
         p.gravity = Gravity.TOP | Gravity.LEFT;
@@ -272,6 +331,7 @@ public class PetService extends Service {
         try {
             wm.addView(v, p);
         } catch (Exception e) {
+            diag("addView 失败: " + e);
             pets.remove(inst);
             if (pets.isEmpty()) stopSelf();
         }
@@ -282,12 +342,13 @@ public class PetService extends Service {
                     + ") size=" + w + "x" + h + " scale=" + sizeScale);
         });
         scheduleSpeak(inst);
+        if (v.isGlitch()) scheduleHallucination(inst);
         if (sizeScale < 1f) {
             inst.growTask = () -> {
                 if (pets.contains(inst) && inst.sizeScale < 1f) growUp(inst);
             };
             handler.postDelayed(inst.growTask, 90000);
-            handler.postDelayed(() -> speak(inst, "草，我在这里呢"), 400);
+            handler.postDelayed(() -> speak(inst, lineFor(inst, "草，我在这里呢")), 400);
         } else {
             inst.ageDeathTask = () -> {
                 if (pets.contains(inst) && inst.sizeScale >= 1f) ageDeath(inst);
@@ -302,9 +363,7 @@ public class PetService extends Service {
         final int dx = inst.params.x, dy = inst.params.y; // 死亡时的坐标
         inst.deathTask = () -> {
             if (!pets.contains(inst)) return;
-            float sc = inst.sizeScale;
             removePet(inst.view);
-            addSkull(dx, dy, sc, false, 0);
         };
         handler.postDelayed(inst.deathTask, 5000);
     }
@@ -312,6 +371,10 @@ public class PetService extends Service {
     private boolean onPetTouch(Inst inst, MotionEvent e) {
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
+                // 只有点到实体像素才响应（透明区域穿透）
+                if (!inst.view.isHitLoose(e.getX(), e.getY())) {
+                    return false;
+                }
                 inst.downRawX = e.getRawX();
                 inst.downRawY = e.getRawY();
                 inst.startX = inst.params.x;
@@ -330,8 +393,8 @@ public class PetService extends Service {
                         handler.removeCallbacks(inst.longPress);
                     }
                     if (!inst.longPressed) {
-                        inst.params.x = clamp((int) (inst.startX + dx), -inst.params.width / 4, screenW - inst.params.width * 3 / 4);
-                        inst.params.y = clamp((int) (inst.startY + dy), 0, screenH - inst.params.height * 3 / 4);
+                        inst.params.x = clampX(inst, (int) (inst.startX + dx), inst.params.width);
+                        inst.params.y = clampY(inst, (int) (inst.startY + dy), inst.params.height);
                         wm.updateViewLayout(inst.view, inst.params);
                     }
                 } else if (dist > dp(40)) {
@@ -347,7 +410,12 @@ public class PetService extends Service {
                     return true; // 拖动结束，位置已实时更新
                 }
                 if (!inst.longPressed) {
+                    if (!inst.view.isHit(e.getX(), e.getY())) return true;  // 点在边缘不算点击
                     inst.view.poke();
+                    if (inst.view.isYujie()) {
+                        playYujieVoiceClip(inst.view.isGlitch());
+                        maybeHorrorRampage(inst);
+                    }
                     long now = SystemClock.uptimeMillis();
                     if (now - inst.lastClickSpeakAt >= 10000 && !inst.view.isDead()) {
                         inst.lastClickSpeakAt = now;
@@ -355,7 +423,7 @@ public class PetService extends Service {
                         if (!key.trim().isEmpty() && rnd.nextInt(100) < 30) {
                             aiSpeak(inst);
                         } else if (rnd.nextInt(100) < 20) {
-                            speak(inst, "你摸我干吗，对我有非分之想吗");
+                            speak(inst, lineFor(inst, "你摸我干吗，对我有非分之想吗"));
                         } else {
                             speakRandom(inst);
                         }
@@ -374,7 +442,7 @@ public class PetService extends Service {
         FrameLayout layer = new FrameLayout(this);
         layer.setBackgroundColor(0x22000000);
         TextView hint = new TextView(this);
-        hint.setText("👆 点击屏幕任意位置，奶蛙会跑过去");
+        hint.setText("👆 点击屏幕任意位置，p1会跑过去");
         hint.setTextColor(0xFFFFFFFF);
         hint.setTextSize(14);
         hint.setGravity(Gravity.CENTER);
@@ -403,7 +471,7 @@ public class PetService extends Service {
         WindowManager.LayoutParams p = new WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
         p.gravity = Gravity.TOP | Gravity.START;
@@ -424,11 +492,22 @@ public class PetService extends Service {
         moveLayer = null;
     }
 
+    /** 位置钳制：巨型雨姐允许跑出屏幕 */
+    private int clampX(Inst inst, int x, int w) {
+        if (inst.view.isGiant()) return clamp(x, -w, screenW);
+        return clamp(x, 0, Math.max(0, screenW - w));
+    }
+
+    private int clampY(Inst inst, int y, int h) {
+        if (inst.view.isGiant()) return clamp(y, -h, screenH);
+        return clamp(y, 0, Math.max(0, screenH - h));
+    }
+
     private void reposition(Inst inst, int x, int y) {
         int w = inst.params.width;
         int h = inst.params.height;
-        inst.params.x = clamp(x, 0, screenW - w);
-        inst.params.y = clamp(y, 0, screenH - h);
+        inst.params.x = clampX(inst, x, w);
+        inst.params.y = clampY(inst, y, h);
         // 本机 updateViewLayout 对悬浮窗不可靠：改为 remove + add 强制落位
         try {
             wm.removeView(inst.view);
@@ -511,11 +590,119 @@ public class PetService extends Service {
         return false;
     }
 
+    /** 随机播放一段雨姐语音（3~6 秒） */
+    private void playYujieVoiceClip() { playYujieVoiceClip(false); }
+
+    private void playYujieVoiceClip(boolean glitch) {
+        try {
+            if (yujieVoice == null) {
+                yujieVoice = MediaPlayer.create(this, R.raw.yujie_voice);
+                if (yujieVoice == null) return;
+            }
+            int dur = yujieVoice.getDuration();
+            if (dur <= 1000) return;
+            int clip = Math.min(6000, dur - 500);
+            int start = rnd.nextInt(Math.max(1, dur - clip));
+            yujieVoice.seekTo(start);
+            applyParams(yujieVoice, glitch ? 0.80f : 1.0f, glitch ? 0.78f : 1.0f);
+            yujieVoice.start();
+            handler.removeCallbacks(yujieVoiceStop);
+            handler.postDelayed(yujieVoiceStop, clip);
+        } catch (Exception e) {
+            diag("雨姐语音播放失败: " + e);
+        }
+    }
+
+    private void toggleYujieBgm() {
+        hideMenu();
+        if (yujieBgmOn) {
+            stopYujieBgm();
+            Toast.makeText(this, "雨姐BGM：关", Toast.LENGTH_SHORT).show();
+        } else {
+            startYujieBgm();
+            Toast.makeText(this, "雨姐BGM：大东北是我的家乡", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void startYujieBgm() {
+        try {
+            if (yujieBgm == null) {
+                yujieBgm = MediaPlayer.create(this, R.raw.dongbei);
+                if (yujieBgm == null) return;
+                yujieBgm.setLooping(true);
+                yujieBgm.setVolume(0.85f, 0.85f);
+            }
+            yujieBgm.start();
+            yujieBgmOn = true;
+        } catch (Exception e) {
+            diag("雨姐BGM 播放失败: " + e);
+        }
+    }
+
+    private void stopYujieBgm() {
+        try {
+            if (yujieBgm != null && yujieBgm.isPlaying()) yujieBgm.pause();
+        } catch (Exception ignore) {}
+        yujieBgmOn = false;
+    }
+
+    /** 召唤东北雨姐：像火焰流星一样从天上砸下来 */
+    private void spawnYujie() {
+        hideMenu();
+        if (pets.size() >= MAX_PETS) return;
+        int roll = rnd.nextInt(100);
+        final String role;
+        final float gs;
+        if (roll < 20) { role = "yujie_giant"; gs = 2f; }        // 20% 巨型独立个体
+        else if (roll < 30) { role = "yujie_glitch"; gs = 1f; }   // 10% 错误化
+        else { role = "yujie"; gs = 1f; }
+        final int w2 = Math.round(petW * gs), h2 = Math.round(petH * gs);
+        final int targetX = clamp(rnd.nextInt(Math.max(1, screenW - w2)), 0, screenW - w2);
+        final int targetY = clamp(rnd.nextInt(Math.max(1, screenH - h2)), 0, screenH - h2);
+        final boolean glitch = "yujie_glitch".equals(role);
+        final Inst inst = spawnPet(targetX, -h2, gs, role);
+        if (inst == null) return;
+        if ("yujie_giant".equals(role)) {
+            // 巨型雨姐：允许窗口超出屏幕（否则横向只剩几十像素可动）
+            inst.params.flags |= WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+            try { wm.updateViewLayout(inst.view, inst.params); } catch (Exception ignore) {}
+        }
+        final long t0 = SystemClock.uptimeMillis();
+        final long dur = 900;
+        Runnable anim = new Runnable() {
+            public void run() {
+                if (!pets.contains(inst)) return;
+                long t = SystemClock.uptimeMillis() - t0;
+                float p = Math.min(1f, t / (float) dur);
+                float e = p * p; // 加速下落
+                inst.params.y = (int) (-h2 + (targetY + h2) * e);
+                try { wm.updateViewLayout(inst.view, inst.params); } catch (Exception ignore) {}
+                inst.view.meteorTrail();
+                if (p < 1f) {
+                    handler.postDelayed(this, 16);
+                } else {
+                    inst.view.fireBurst();
+                    if (glitch) {
+                        showBubble(inst, "别回头…", 2600);
+                    } else {
+                        showBubble(inst, "🔥 雨姐驾到！", 2200);
+                    }
+                    playYujieVoiceClip(glitch);
+                    if ("yujie_giant".equals(role)) scheduleGiantVoice(inst);
+                }
+            }
+        };
+        handler.post(anim);
+        handler.postDelayed(() -> {
+            if (pets.contains(inst)) speak(inst, "嘎哈呢老铁？姐来啦！");
+        }, 2600);
+    }
+
     private void mate(Inst target) {
         if (target == null) return;
         if (pets.size() == 1) {
             target.view.soloPlay(); // 孤单自娱 + 产生白色液体
-            speak(target, "允许起飞");
+            speak(target, lineFor(target, "允许起飞"));
             return;
         }
         if (pets.size() >= MAX_PETS) return;
@@ -555,8 +742,8 @@ public class PetService extends Service {
 
         mover.view.mate();
         anchor.view.mate();
-        if (rnd.nextInt(100) < 70) speak(a, "哎呀我草");
-        if (rnd.nextInt(100) < 70) speak(b, "哎呀我草");
+        if (rnd.nextInt(100) < 70) speak(a, lineFor(a, "哎呀我草"));
+        if (rnd.nextInt(100) < 70) speak(b, lineFor(b, "哎呀我草"));
 
         final Inst pairA = a;
         final Inst pairB = b;
@@ -566,7 +753,18 @@ public class PetService extends Service {
             Inst below = pairB;
             int cx = clamp(below.params.x + rnd.nextInt(dp(50)) - dp(25), 0, screenW - dp(60));
             int cy = clamp(below.params.y + below.params.height + dp(4), 0, screenH - dp(66));
-            Inst child = spawnPet(cx, cy, 0.3f);
+            boolean crossRole = !pairA.view.getRole().equals(pairB.view.getRole());
+            Inst child;
+            if (crossRole) {
+                // 奶蛙 × 雨姐：随机 0.3 倍奶蛙 / 0.4 倍雨姐
+                if (rnd.nextBoolean()) {
+                    child = spawnPet(cx, cy, 0.3f, "naiwa");
+                } else {
+                    child = spawnPet(cx, cy, 0.4f, "yujie");
+                }
+            } else {
+                child = spawnPet(cx, cy, 0.3f, pairA.view.getRole());
+            }
             child.view.playSpawn();
             if (crossSize) {
                 Inst big = pairA.sizeScale > pairB.sizeScale ? pairA : pairB;
@@ -592,6 +790,16 @@ public class PetService extends Service {
             if (!pets.contains(eater) || !pets.contains(victim)) return;
             eater.view.playEat();
             victim.view.playBeingEaten();
+            // 雨姐吃掉同类：40% 概率异变成恐怖雨姐
+            if (eater.view.isYujie() && !eater.view.isGlitch() && rnd.nextInt(100) < 40) {
+                handler.postDelayed(() -> {
+                    if (!pets.contains(eater)) return;
+                    eater.view.setRole("yujie_glitch");
+                    eater.view.fireBurst();
+                    speak(eater, "你看见我了…");
+                    scheduleHallucination(eater);
+                }, 900);
+            }
             if (eater.sizeScale < 1f) {
                 handler.postDelayed(() -> {
                     if (pets.contains(eater) && eater.sizeScale < 1f) growUp(eater);
@@ -623,7 +831,7 @@ public class PetService extends Service {
         inst.growTask = null;
         resizeAndMove(inst, petW, petH, cx - petW / 2, cy - petH / 2);
         inst.view.playGrowUp();
-        speak(inst, "还是小孩舒服呀");
+        speak(inst, lineFor(inst, "还是小孩舒服呀"));
         inst.ageDeathTask = () -> {
             if (pets.contains(inst) && inst.sizeScale >= 1f) ageDeath(inst);
         };
@@ -633,8 +841,8 @@ public class PetService extends Service {
     private void resizeAndMove(Inst inst, int w, int h, int x, int y) {
         inst.params.width = w;
         inst.params.height = h;
-        inst.params.x = clamp(x, 0, screenW - w);
-        inst.params.y = clamp(y, 0, screenH - h);
+        inst.params.x = clampX(inst, x, w);
+        inst.params.y = clampY(inst, y, h);
         try {
             wm.updateViewLayout(inst.view, inst.params);
         } catch (Exception e) {
@@ -663,7 +871,7 @@ public class PetService extends Service {
         DroppingView v = new DroppingView(this, type);
         WindowManager.LayoutParams p = new WindowManager.LayoutParams(
                 w, h,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
@@ -700,8 +908,154 @@ public class PetService extends Service {
             droppings.remove(nearest);
             try { wm.removeView(nearest.view); } catch (Exception ignore) {}
             inst.view.playEatDropping(type);
-            if (rnd.nextBoolean()) speak(inst, "美汁汁");
+            if (rnd.nextBoolean()) speak(inst, lineFor(inst, "美汁汁"));
         }
+    }
+
+    /** 点击雨姐：30% 概率狂暴 3 秒，期间吞掉 1~2 个同类 */
+    private void maybeHorrorRampage(final Inst inst) {
+        if (!inst.view.isGlitch()) return;   // 只有错误化雨姐会狂暴
+        long nowMs = SystemClock.uptimeMillis();
+        if (nowMs - inst.lastRampageAt < 9000) return;  // 9 秒冷却
+        if (rnd.nextInt(100) >= 30) return;
+        inst.lastRampageAt = nowMs;
+        inst.rampaging = true;
+        handler.postDelayed(() -> inst.rampaging = false, 3000);
+        inst.view.horrorHold(3000);
+        playStutterVoice();
+        showBubble(inst, "你看见我了…", 1600);
+        final List<Inst> targets = new ArrayList<>();
+        for (Inst o : pets) {
+            if (o == inst || o.view.isDead()) continue;
+            targets.add(o);
+        }
+        targets.sort((a, b) -> {
+            double da = Math.hypot(a.params.x - inst.params.x, a.params.y - inst.params.y);
+            double db = Math.hypot(b.params.x - inst.params.x, b.params.y - inst.params.y);
+            return Double.compare(da, db);
+        });
+        final int eatCount = 1 + rnd.nextInt(2);
+        for (int i = 0; i < Math.min(eatCount, targets.size()); i++) {
+            final Inst v = targets.get(i);
+            handler.postDelayed(() -> {
+                if (!pets.contains(v)) return;
+                v.view.playBeingEaten();
+                handler.postDelayed(() -> {
+                    if (pets.contains(v)) removePet(v.view);
+                }, 700);
+            }, 400 + i * 600);
+        }
+    }
+
+    /** 雨姐「错觉」：随机突然闪现恐怖画面 + 变调声音，然后恢复正常 */
+    private void scheduleHallucination(final Inst inst) {
+        if (!inst.view.isGlitch()) return;
+        if (inst.hallucinationTask != null) handler.removeCallbacks(inst.hallucinationTask);
+        int delay = inst.view.isGlitch() ? (4000 + rnd.nextInt(7000))
+                                         : (9000 + rnd.nextInt(15000));
+        inst.hallucinationTask = () -> {
+            if (!pets.contains(inst) || inst.view.isDead()) return;
+            if (inst.rampaging) { scheduleHallucination(inst); return; }
+            int chance = inst.view.isGlitch() ? 88 : 55;
+            if (rnd.nextInt(100) < chance) {
+                inst.view.jumpscare();
+                int mode = rnd.nextInt(10);
+                if (mode < 5) playYujieScareVoice();
+                else if (mode < 8) playStutterVoice();
+                else playYujieVoiceClip(true);
+                if (rnd.nextInt(100) < 30) {
+                    showBubble(inst, YUJIE_HORROR_LINES[rnd.nextInt(YUJIE_HORROR_LINES.length)], 1400);
+                }
+            }
+            scheduleHallucination(inst);
+        };
+        handler.postDelayed(inst.hallucinationTask, delay);
+    }
+
+    /** 错觉音效：突然跑调/变轨 */
+    private void playYujieScareVoice() {
+        try {
+            if (yujieVoice == null) {
+                yujieVoice = MediaPlayer.create(this, R.raw.yujie_voice);
+                if (yujieVoice == null) return;
+            }
+            int dur = yujieVoice.getDuration();
+            if (dur <= 1200) return;
+            int start = rnd.nextInt(Math.max(1, dur - 4000));
+            yujieVoice.seekTo(start);
+            applyParams(yujieVoice, 1.25f, 0.55f);
+            yujieVoice.start();
+            handler.removeCallbacks(yujieVoiceStop);
+            handler.postDelayed(yujieVoiceStop, 1500);
+        } catch (Exception ignore) {}
+    }
+
+    /** 巨型雨姐：偶尔声音突然尖锐跑调，然后恢复正常 */
+    private void scheduleGiantVoice(final Inst inst) {
+        int delay = 8000 + rnd.nextInt(12000);
+        inst.giantVoiceTask = () -> {
+            if (!pets.contains(inst) || inst.view.isDead()) return;
+            if (rnd.nextInt(100) < 70) {
+                playSharpVoice();
+                if (rnd.nextInt(100) < 40) showBubble(inst, "……", 900);
+            }
+            scheduleGiantVoice(inst);
+        };
+        handler.postDelayed(inst.giantVoiceTask, delay);
+    }
+
+    /** 尖锐跑调音效 */
+    private void playSharpVoice() {
+        try {
+            if (yujieVoice == null) {
+                yujieVoice = MediaPlayer.create(this, R.raw.yujie_voice);
+                if (yujieVoice == null) return;
+            }
+            int dur = yujieVoice.getDuration();
+            if (dur <= 1500) return;
+            int start = rnd.nextInt(Math.max(1, dur - 3000));
+            yujieVoice.seekTo(start);
+            applyParams(yujieVoice, 1.3f, 2.3f);
+            yujieVoice.start();
+            handler.removeCallbacks(yujieVoiceStop);
+            handler.postDelayed(yujieVoiceStop, 1200);
+        } catch (Exception ignore) {}
+    }
+
+    private void applyParams(MediaPlayer mp, float speed, float pitch) {
+        if (mp == null) return;
+        if (android.os.Build.VERSION.SDK_INT < 23) return;
+        try {
+            android.media.PlaybackParams pp = new android.media.PlaybackParams();
+            pp.setSpeed(speed);
+            pp.setPitch(pitch);
+            mp.setPlaybackParams(pp);
+        } catch (Exception ignore) {}
+    }
+
+    /** 卡带式音效：同一个短音疯狂重复 */
+    private void playStutterVoice() {
+        try {
+            int res = rnd.nextBoolean() ? R.raw.stutter1 : R.raw.stutter2;
+            if (stutterPlayer != null) {
+                try { stutterPlayer.release(); } catch (Exception ignore) {}
+                stutterPlayer = null;
+            }
+            stutterPlayer = MediaPlayer.create(this, res);
+            if (stutterPlayer == null) return;
+            stutterPlayer.setLooping(true);
+            stutterPlayer.setVolume(1f, 1f);
+            stutterPlayer.start();
+            handler.postDelayed(() -> {
+                try {
+                    if (stutterPlayer != null) {
+                        stutterPlayer.stop();
+                        stutterPlayer.release();
+                        stutterPlayer = null;
+                    }
+                } catch (Exception ignore) {}
+            }, 950);
+        } catch (Exception ignore) {}
     }
 
     private void scheduleSpeak(Inst inst) {
@@ -732,8 +1086,27 @@ public class PetService extends Service {
         }).start();
     }
 
+    /** 按角色选台词：雨姐用她自己的，奶蛙用原来的 */
+    private String lineFor(Inst inst, String naiwaLine) {
+        if (inst.view.isGlitch()) {
+            return YUJIE_HORROR_LINES[rnd.nextInt(YUJIE_HORROR_LINES.length)];
+        }
+        if (inst.view.isYujie()) {
+            return YUJIE_LINES[rnd.nextInt(YUJIE_LINES.length)];
+        }
+        return naiwaLine;
+    }
+
     private void speakRandom(Inst inst) {
-        String[] small = {"原神牛逼", "你瞅啥", "我爱你鸭", "我是个悲子", "杂鱼，杂鱼，杂鱼！"};
+        if (inst.view.isGlitch()) {
+            speak(inst, YUJIE_HORROR_LINES[rnd.nextInt(YUJIE_HORROR_LINES.length)]);
+            return;
+        }
+        if (inst.view.isYujie()) {
+            speak(inst, YUJIE_LINES[rnd.nextInt(YUJIE_LINES.length)]);
+            return;
+        }
+        String[] small = {"原神牛逼", "咕呱咕呱", "我爱你鸭", "我是个悲子", "杂鱼，杂鱼，杂鱼！"};
         String[] big = {"阿米洛斯", "我不是萝莉控", "我饿了", "我快老死了，我还是个处", "我是个乐子"};
         String[] arr = inst.sizeScale < 1f ? small : big;
         speak(inst, arr[rnd.nextInt(arr.length)]);
@@ -743,10 +1116,25 @@ public class PetService extends Service {
         int len = text.codePointCount(0, text.length());
         long ms = 3000 + len * 500;
         showBubble(inst, text, ms);
-        playCroak(len); // 每个字播一声笑，长度随字数
+        if (!inst.view.isYujie()) {
+            playCroak(len); // 奶蛙：每个字播一声笑
+        }
         inst.view.laugh();
         resetAge(inst);
     }
+
+    private static final String[] YUJIE_HORROR_LINES = {
+            "别回头…", "你看见我了…", "快跑…", "我一直在你身后…", "你踩到我了…",
+            "别关灯…", "回头看看我…", "我是雨姐啊…", "你逃不掉的…", "这里不是你该来的地方…"
+    };
+
+    private static final String[] YUJIE_LINES = {
+            "嘎哈呢老铁？", "整一个！", "得劲！", "瞅你那损色！", "老铁666！",
+            "麻溜的！", "俺们东北人讲究实在！", "你瞅啥？瞅你咋地！", "这玩意儿嘎嘎好使！",
+            "完犊子了！", "拉倒吧！", "贼拉棒！", "嗷嗷叫！", "姐就是女王！",
+            "大东北是我的家乡！", "来跟姐整两句！", "咋整啊老铁？", "这波稳了！",
+            "你可拉倒吧！", "老铁双击666！"
+    };
 
     private void showBubble(Inst inst, String text, long ms) {
         hideBubble(inst);
@@ -769,7 +1157,7 @@ public class PetService extends Service {
         WindowManager.LayoutParams p = new WindowManager.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                         | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
@@ -812,19 +1200,6 @@ public class PetService extends Service {
         inst.view.ageDeath();
     }
 
-    private void startAgeSkull(PetView who) {
-        Inst inst = null;
-        for (Inst i : pets) {
-            if (i.view == who) { inst = i; break; }
-        }
-        if (inst == null) return;
-        int x = inst.params.x, y = inst.params.y;
-        float sc = inst.sizeScale;
-        if (inst.deathTask != null) handler.removeCallbacks(inst.deathTask);
-        removePet(inst.view);
-        addSkull(x, y, sc, false, 7000); // 普通骷髅 7 秒清除
-    }
-
     private void resetAge(Inst inst) {
         if (inst.ageDeathTask != null) {
             handler.removeCallbacks(inst.ageDeathTask);
@@ -855,7 +1230,7 @@ public class PetService extends Service {
         box.setBackground(bg);
         box.setPadding(dp(20), dp(16), dp(20), dp(16));
         TextView title = new TextView(this);
-        title.setText("💀 奶蛙都死了");
+        title.setText("💀 p1都死了");
         title.setTextColor(0xFFFFFFFF);
         title.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(16));
         title.setGravity(Gravity.CENTER);
@@ -871,7 +1246,7 @@ public class PetService extends Service {
         WindowManager.LayoutParams p = new WindowManager.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT);
         p.gravity = Gravity.CENTER;
@@ -903,7 +1278,7 @@ public class PetService extends Service {
         box.setBackground(bg);
         box.setPadding(dp(8), dp(8), dp(8), dp(8));
         EditText et = new EditText(this);
-        et.setHint("跟奶蛙说…");
+        et.setHint("跟p1说…");
         et.setTextColor(0xFFFFFFFF);
         et.setHintTextColor(0xFF888888);
         et.setSingleLine(true);
@@ -924,7 +1299,7 @@ public class PetService extends Service {
         WindowManager.LayoutParams p = new WindowManager.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 PixelFormat.TRANSLUCENT);
         p.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
@@ -997,132 +1372,6 @@ public class PetService extends Service {
         if (pets.isEmpty()) showRestartButton();
     }
 
-    // ---------- 骷髅 ----------
-    private void addSkull(int x, int y, float sizeScale, boolean ashes, long disappearMs) {
-        Skull s = new Skull();
-        s.sizeScale = sizeScale;
-        int w = Math.round(dp(46) * sizeScale);
-        int h = Math.round(dp(52) * sizeScale);
-        SkullView v = new SkullView(this, ashes);
-        v.setOnClickListener(vv -> showSkullMenu(s));
-        v.setOnLongClickListener(vv -> {
-            showSkullMenu(s);
-            return true;
-        });
-        WindowManager.LayoutParams p = new WindowManager.LayoutParams(
-                w, h,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                PixelFormat.TRANSLUCENT);
-        p.gravity = Gravity.TOP | Gravity.LEFT;
-        p.x = clamp(x, 0, screenW - w);
-        p.y = clamp(y, 0, screenH - h);
-        s.view = v;
-        s.params = p;
-        skulls.add(s);
-        try {
-            wm.addView(v, p);
-        } catch (Exception e) {
-            skulls.remove(s);
-        }
-        if (disappearMs > 0) {
-            handler.postDelayed(() -> removeSkull(s), disappearMs);
-        }
-    }
-
-    private void startAshSkull(PetView who) {
-        Inst inst = null;
-        for (Inst i : pets) {
-            if (i.view == who) { inst = i; break; }
-        }
-        if (inst == null) return;
-        int x = inst.params.x, y = inst.params.y;
-        float sc = inst.sizeScale;
-        if (inst.deathTask != null) handler.removeCallbacks(inst.deathTask);
-        removePet(inst.view);
-        addSkull(x, y, sc, true, 1000); // 白灰骷髅，1 秒后消失
-    }
-
-    private void removeSkull(Skull s) {
-        skulls.remove(s);
-        try {
-            wm.removeView(s.view);
-        } catch (Exception ignore) {
-        }
-        hideSkullMenu();
-    }
-
-    private void showSkullMenu(final Skull s) {
-        hideSkullMenu();
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xF2262626);
-        bg.setCornerRadius(dp(18));
-        bg.setStroke(dp(1), 0x66FFFFFF);
-        root.setBackground(bg);
-        root.setPadding(dp(14), dp(12), dp(14), dp(12));
-
-        TextView title = new TextView(this);
-        title.setText("💀 奶蛙的遗骸");
-        title.setTextColor(0xFFFFEB99);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(16));
-        title.setGravity(Gravity.CENTER);
-        title.setPadding(0, 0, 0, dp(8));
-        root.addView(title, new LinearLayout.LayoutParams(dp(220), ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        TextView clean = makeMenuText("🧹 清理掉");
-        clean.setOnClickListener(v -> removeSkull(s));
-        root.addView(clean, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        TextView revive = makeMenuText("✨ 复活它");
-        revive.setOnClickListener(v -> {
-            int x = s.params.x, y = s.params.y;
-            float sc = s.sizeScale;
-            removeSkull(s);
-            Inst inst = spawnPet(x, y, sc);
-            inst.view.playSpawn();
-            playSound(PetView.S_REVIVE);
-        });
-        root.addView(revive, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        root.setOnTouchListener((v, ev) -> {
-            if (ev.getActionMasked() == MotionEvent.ACTION_OUTSIDE) {
-                hideSkullMenu();
-                return true;
-            }
-            return false;
-        });
-
-        skullMenuParams = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
-                PixelFormat.TRANSLUCENT);
-        skullMenuParams.gravity = Gravity.CENTER;
-        skullMenu = root;
-        root.setAlpha(0f);
-        try {
-            wm.addView(root, skullMenuParams);
-            root.animate().alpha(1f).setDuration(150).start();
-        } catch (Exception e) {
-            skullMenu = null;
-        }
-    }
-
-    private void hideSkullMenu() {
-        if (skullMenu == null) return;
-        try {
-            wm.removeView(skullMenu);
-        } catch (Exception ignore) {
-        }
-        skullMenu = null;
-    }
-
     private TextView makeMenuText(String text) {
         TextView b = new TextView(this);
         b.setText(text);
@@ -1159,7 +1408,7 @@ public class PetService extends Service {
         root.setPadding(dp(14), dp(12), dp(14), dp(12));
 
         TextView title = new TextView(this);
-        title.setText(pets.size() > 1 ? "🐸 奶蛙菜单（" + pets.size() + " 只）" : "🐸 奶蛙菜单");
+        title.setText(pets.size() > 1 ? "🐸 p1菜单（" + pets.size() + " 只）" : "🐸 p1菜单");
         title.setTextColor(0xFFFFEB99);
         title.setTextSize(TypedValue.COMPLEX_UNIT_PX, sp(17));
         title.setGravity(Gravity.CENTER);
@@ -1182,11 +1431,13 @@ public class PetService extends Service {
         addBtn(grid, target.dragMode ? "✋ 拖动：开" : "✋ 拖动：关", () -> {
             target.dragMode = !target.dragMode;
             Toast.makeText(PetService.this,
-                    target.dragMode ? "拖动已开启：按住奶蛙即可移动" : "拖动已关闭",
+                    target.dragMode ? "拖动已开启：按住p1即可移动" : "拖动已关闭",
                     Toast.LENGTH_SHORT).show();
         });
         addBtn(grid, "💞 交配", () -> mate(target));
         addBtn(grid, "👥 召唤同类", () -> spawnNear(target, 1f));
+        addBtn(grid, "🔥 召唤雨姐", this::spawnYujie);
+        addBtn(grid, yujieBgmOn ? "🎵 雨姐BGM：开" : "🎵 雨姐BGM：关", this::toggleYujieBgm);
         addBtn(grid, "🦖 吃掉同类", () -> eatSameKind(target));
         addBtn(grid, "🏃 点击移动", () -> enterMoveMode(target));
         addBtn(grid, "🤖 AI 对话", this::openAiChat);
@@ -1209,7 +1460,7 @@ public class PetService extends Service {
         menuParams = new WindowManager.LayoutParams(
                 dp(340),
                 mh,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                         | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
                 PixelFormat.TRANSLUCENT);
@@ -1278,8 +1529,17 @@ public class PetService extends Service {
     @Override
     public void onDestroy() {
         handler.removeCallbacksAndMessages(null);
+        try {
+            if (yujieBgm != null) { yujieBgm.release(); yujieBgm = null; }
+        } catch (Exception ignore) {}
+        try {
+            if (yujieVoice != null) { yujieVoice.release(); yujieVoice = null; }
+        } catch (Exception ignore) {}
+        try {
+            if (stutterPlayer != null) { stutterPlayer.release(); stutterPlayer = null; }
+        } catch (Exception ignore) {}
+        yujieBgmOn = false;
         hideMenu();
-        hideSkullMenu();
         hideChatInput();
         hideRestartButton();
         for (Inst inst : pets) {
@@ -1290,13 +1550,6 @@ public class PetService extends Service {
             }
         }
         pets.clear();
-        for (Skull s : skulls) {
-            try {
-                wm.removeView(s.view);
-            } catch (Exception ignore) {
-            }
-        }
-        skulls.clear();
         for (Dropping d : droppings) {
             try {
                 wm.removeView(d.view);

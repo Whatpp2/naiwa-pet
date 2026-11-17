@@ -31,10 +31,215 @@ import java.util.List;
 import java.util.Random;
 
 /**
- * 奶蛙本体：绘制、呼吸/眨眼/眼神等基础动画，以及点击、跳舞、哭泣、死亡、复活、
+ * p1本体：绘制、呼吸/眨眼/眼神等基础动画，以及点击、跳舞、哭泣、死亡、复活、
  * 吃饭、拉屎、尿尿、吃排泄物、被吃等行为动画。
  */
 public class PetView extends View {
+
+    private String role = "naiwa";
+    private String yujieExpr = "idle";
+
+    private static Bitmap sYjIdle, sYjTsun, sYjWow, sYjAngry, sYjSad, sYjLove, sYjGlitch;
+    private static Bitmap sScareHeadless, sScareBlood, sScareFace;
+    private Bitmap scareBmp = null;
+    private boolean scareInvert = false;
+    private float scareZoom = 1f;
+    private float jellyT = 0f;
+
+    public void setRole(String r) {
+        this.role = r;
+        if (r != null && r.startsWith("yujie")) loadYujie();
+    }
+    public String getRole() { return role; }
+
+    private void loadYujie() {
+        if (sYjIdle != null) return;
+        try {
+            android.content.res.AssetManager am = getContext().getAssets();
+            sYjIdle = BitmapFactory.decodeStream(am.open("yujie/idle.png"));
+            sYjTsun = BitmapFactory.decodeStream(am.open("yujie/tsun.png"));
+            sYjWow = BitmapFactory.decodeStream(am.open("yujie/wow.png"));
+            sYjAngry = BitmapFactory.decodeStream(am.open("yujie/angry.png"));
+            sYjSad = BitmapFactory.decodeStream(am.open("yujie/sad.png"));
+            sYjLove = BitmapFactory.decodeStream(am.open("yujie/love.png"));
+            sYjGlitch = BitmapFactory.decodeStream(am.open("yujie/glitch.png"));
+            sScareHeadless = BitmapFactory.decodeStream(am.open("yujie/h1_headless.png"));
+            sScareBlood = BitmapFactory.decodeStream(am.open("yujie/h2_blood.png"));
+            sScareFace = BitmapFactory.decodeStream(am.open("yujie/h3_face.png"));
+        } catch (Exception ignore) {}
+    }
+
+    public boolean isGlitch() { return "yujie_glitch".equals(role); }
+
+    public boolean isGiant() { return "yujie_giant".equals(role); }
+
+    /** 宽松命中：只按模型外框判断（用于拖动，避免点不到边缘） */
+    public boolean isHitLoose(float x, float y) {
+        int w = getWidth(), h = getHeight();
+        if (w <= 0 || h <= 0) return true;
+        Bitmap b;
+        float left, top, bw, bh;
+        if (isYujie()) {
+            b = scareBmp != null ? scareBmp : yujieBmp();
+            if (b == null) return true;
+            float z = scareBmp != null ? scareZoom : 1f;
+            if (z > 1.5f) {
+                bw = w * 0.96f * z;
+                bh = bw * b.getHeight() / (float) b.getWidth();
+            } else {
+                float maxW = w * 0.96f, maxH = h * 0.98f;
+                float fit = Math.min(maxW / b.getWidth(), maxH / b.getHeight());
+                bw = b.getWidth() * fit;
+                bh = b.getHeight() * fit;
+            }
+            left = w / 2f - bw / 2f;
+            top = h - bh;
+        } else {
+            b = bmpIdle;
+            if (b == null) return true;
+            float sc = Math.min(w / (float) b.getWidth(), h / (float) b.getHeight());
+            bw = b.getWidth() * sc;
+            bh = b.getHeight() * sc;
+            left = (w - bw) / 2f;
+            top = (h - bh) / 2f;
+        }
+        return x >= left && x <= left + bw && y >= top && y <= top + bh;
+    }
+
+    /** 命中检测：只有触摸到不透明像素才算点到 */
+    public boolean isHit(float x, float y) {
+        int w = getWidth(), h = getHeight();
+        if (w <= 0 || h <= 0) return true;
+        Bitmap b;
+        float bw, bh, left, top;
+        if (isYujie()) {
+            b = scareBmp != null ? scareBmp : yujieBmp();
+            if (b == null) return true;
+            float cx = w / 2f;
+            float z = scareBmp != null ? scareZoom : 1f;
+            if (z > 1.5f) {
+                // 贴脸放大：允许超出窗口
+                bw = w * 0.96f * z;
+                bh = bw * b.getHeight() / (float) b.getWidth();
+                left = cx - bw / 2f;
+                top = h - bh;
+            } else {
+                float maxW = w * 0.96f, maxH = h * 0.98f;
+                float fit = Math.min(maxW / b.getWidth(), maxH / b.getHeight());
+                bw = b.getWidth() * fit;
+                bh = b.getHeight() * fit;
+                left = cx - bw / 2f;
+                top = h - bh;
+                // 雨姐系：横向点击范围缩小并居中（模型大小不变）
+                // 巨型 0.3（竖长条），其他雨姐 0.5
+                float k = isGiant() ? 0.3f : 0.5f;
+                float nw = bw * k;
+                left += (bw - nw) / 2f;
+                bw = nw;
+            }
+        } else {
+            b = bmpIdle;
+            if (b == null) return true;
+            float sc = Math.min(w / (float) b.getWidth(), h / (float) b.getHeight());
+            bw = b.getWidth() * sc;
+            bh = b.getHeight() * sc;
+            left = (w - bw) / 2f;
+            top = (h - bh) / 2f;
+        }
+        if (x < left || x > left + bw || y < top || y > top + bh) return false;
+        int px = (int) ((x - left) / bw * b.getWidth());
+        int py = (int) ((y - top) / bh * b.getHeight());
+        px = Math.max(0, Math.min(b.getWidth() - 1, px));
+        py = Math.max(0, Math.min(b.getHeight() - 1, py));
+        return (b.getPixel(px, py) >>> 24) > 40;
+    }
+
+    /** 雨姐系（含错误化） */
+    public boolean isYujie() { return role != null && role.startsWith("yujie"); }
+
+    private Bitmap yujieBmp() {
+        switch (yujieExpr) {
+            case "tsun": return sYjTsun != null ? sYjTsun : sYjIdle;
+            case "wow": return sYjWow != null ? sYjWow : sYjIdle;
+            case "angry": return sYjAngry != null ? sYjAngry : sYjIdle;
+            case "sad": return sYjSad != null ? sYjSad : sYjIdle;
+            case "love": return sYjLove != null ? sYjLove : sYjIdle;
+            default: return sYjIdle;
+        }
+    }
+
+    /** 点击时 Q 弹（果冻抖动） */
+    public void jelly() {
+        if (!isYujie()) return;
+        android.animation.ValueAnimator a = android.animation.ValueAnimator.ofFloat(0f, 1f);
+        a.setDuration(520);
+        a.addUpdateListener(x -> {
+            jellyT = (float) x.getAnimatedValue();
+            invalidate();
+        });
+        a.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(android.animation.Animator anim) {
+                jellyT = 0f; invalidate();
+            }
+        });
+        a.start();
+    }
+
+    /** 持续恐怖形态（用于点击后的 3 秒狂暴） */
+    public void horrorHold(int ms) {
+        if (!isYujie()) return;
+        scareInvert = false;
+        scareZoom = 1f;
+        scareBmp = sScareBlood != null ? sScareBlood : sScareHeadless;
+        if (scareBmp == null) return;
+        invalidate();
+        postDelayed(() -> { scareBmp = null; invalidate(); }, ms);
+    }
+
+    /** 错觉：突然变恐怖再变回来（闪现 260ms） */
+    public void jumpscare() {
+        if (!isYujie()) return;
+        int v = rnd.nextInt(4);
+        scareInvert = (v == 3);
+        if (scareInvert) {
+            scareBmp = yujieBmp();
+            scareZoom = 1f;
+        } else {
+            Bitmap[] arr = {sScareHeadless, sScareBlood, sScareFace};
+            scareBmp = arr[v];
+            // 只有「贴脸」才放大
+            scareZoom = (v == 2) ? 1.85f : 1f;
+        }
+        if (scareBmp == null) { scareInvert = false; return; }
+        invalidate();
+        postDelayed(() -> { scareBmp = null; scareInvert = false; invalidate(); }, 190);
+        // 30% 概率紧跟第二下
+        if (rnd.nextInt(100) < 30) {
+            postDelayed(() -> {
+                if (!isYujie()) return;
+                scareInvert = rnd.nextInt(100) < 25;
+                if (scareInvert) { scareBmp = yujieBmp(); scareZoom = 1f; }
+                else {
+                    int v2 = rnd.nextInt(3);
+                    Bitmap[] a2 = {sScareHeadless, sScareBlood, sScareFace};
+                    scareBmp = a2[v2];
+                    scareZoom = (v2 == 2) ? 1.85f : 1f;
+                }
+                if (scareBmp == null) { scareInvert = false; return; }
+                invalidate();
+                postDelayed(() -> { scareBmp = null; scareInvert = false; invalidate(); }, 150);
+            }, 230);
+        }
+    }
+
+    private void setYujieExpr(String e) {
+        if (!"yujie".equals(role)) return;
+        yujieExpr = e;
+        invalidate();
+        postDelayed(() -> {
+            if (isYujie()) { yujieExpr = "idle"; invalidate(); }
+        }, 1800);
+    }
 
     public interface Listener {
         void playSound(int type);
@@ -59,6 +264,8 @@ public class PetView extends View {
     private float dancePhase = 0f;
     private float cryPhase = 0f;
     private float shakeX = 0f;
+    private float shakeY = 0f;
+    private float shockwave = -1f; // >=0 表示冲击波进行中
     private float scale = 1f;
     private float hoverScale = 1f, targetHoverScale = 1f;
     private float hoverTilt = 0f, targetHoverTilt = 0f;
@@ -282,6 +489,8 @@ public class PetView extends View {
 
     // ---------- 点击 ----------
     public void poke() {
+        setYujieExpr("tsun");
+        jelly();
         if (isDead() || isBusy()) return;
         cancelCurrent();
         final ValueAnimator a = ValueAnimator.ofFloat(0f, 1f);
@@ -335,6 +544,7 @@ public class PetView extends View {
 
     // ---------- 哭泣 ----------
     public void cry() {
+        setYujieExpr("sad");
         if (isDead() || isBusy()) return;
         cancelCurrent();
         mode = Mode.CRY;
@@ -503,6 +713,7 @@ public class PetView extends View {
 
     // ---------- 被闪电劈死 ----------
     public void thunderDeath() {
+        setYujieExpr("angry");
         if (isDead()) return;
         cancelCurrent();
         mode = Mode.DYING;
@@ -675,6 +886,7 @@ public class PetView extends View {
 
     // ---------- 死亡 ----------
     public void kill() {
+        setYujieExpr("angry");
         if (isDead()) return;
         cancelCurrent();
         mode = Mode.DYING;
@@ -760,6 +972,7 @@ public class PetView extends View {
 
     // ---------- 交配 ----------
     public void mate() {
+        setYujieExpr("love");
         if (isDead()) return;
         cancelCurrent();
         mode = Mode.MATING;
@@ -810,6 +1023,66 @@ public class PetView extends View {
     }
 
     // ---------- 出生 ----------
+    /** 流星降落时的火焰尾迹 */
+    public void meteorTrail() {
+        int w = getWidth(), h = getHeight();
+        float cx = w / 2f;
+        float cy = h * 0.55f;
+        for (int i = 0; i < 3; i++) {
+            Particle p = new Particle();
+            p.kind = (rnd.nextInt(100) < 70) ? 11 : 12;
+            p.x = cx + (rnd.nextFloat() - 0.5f) * w * 0.5f;
+            p.y = cy + (rnd.nextFloat() - 0.5f) * h * 0.35f;
+            p.vx = (rnd.nextFloat() - 0.5f) * dp(1.4f);
+            p.vy = -dp(1.2f) - rnd.nextFloat() * dp(2.2f);
+            p.g = dp(0.04f);
+            p.life = 1f;
+            p.size = dp(10) + rnd.nextFloat() * dp(16);
+            particles.add(p);
+        }
+        invalidate();
+    }
+
+    /** 落地火焰爆开 + 冲击波 */
+    public void fireBurst() {
+        int w = getWidth(), h = getHeight();
+        float cx = w / 2f;
+        float cy = h * 0.80f;
+        for (int i = 0; i < 34; i++) {
+            double ang = rnd.nextDouble() * Math.PI * 2;
+            float sp = dp(1.5f) + rnd.nextFloat() * dp(4.5f);
+            Particle p = new Particle();
+            p.kind = (rnd.nextInt(100) < 60) ? 11 : 12;
+            p.x = cx + (rnd.nextFloat() - 0.5f) * w * 0.3f;
+            p.y = cy + (rnd.nextFloat() - 0.5f) * dp(10);
+            p.vx = (float) Math.cos(ang) * sp;
+            p.vy = (float) Math.sin(ang) * sp - dp(1.0f);
+            p.g = dp(0.10f);
+            p.life = 1f;
+            p.size = dp(8) + rnd.nextFloat() * dp(18);
+            particles.add(p);
+        }
+        // 冲击波 + 抖动
+        shockwave = 0f;
+        animateShake(dp(7f), 520);
+        invalidate();
+    }
+
+    private void animateShake(final float amt, int dur) {
+        android.animation.ValueAnimator a = android.animation.ValueAnimator.ofFloat(1f, 0f);
+        a.setDuration(dur);
+        a.addUpdateListener(x -> {
+            float t = (float) x.getAnimatedValue();
+            shakeX = (float) Math.sin(t * 60f) * amt * t;
+            shakeY = (float) Math.cos(t * 47f) * amt * 0.6f * t;
+            invalidate();
+        });
+        a.addListener(new AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(Animator anim) { shakeX = 0; shakeY = 0; invalidate(); }
+        });
+        a.start();
+    }
+
     public void playSpawn() {
         cancelCurrent();
         mode = Mode.REVIVING;
@@ -1061,6 +1334,15 @@ public class PetView extends View {
     // ---------- 绘制 ----------
     @Override
     protected void onDraw(Canvas c) {
+        if (isYujie()) {
+            drawYujie(c);
+            if (shockwave >= 0f) {
+                shockwave += 0.05f;
+                if (shockwave >= 1f) shockwave = -1f;
+                postInvalidateOnAnimation();
+            }
+            return;
+        }
         int w = getWidth(), h = getHeight();
         float cx = w / 2f;
         float r = Math.min(w, h) * 0.30f;
@@ -1071,10 +1353,14 @@ public class PetView extends View {
         float bodyScaleY = 1f + 0.015f * breath;
         float bodyShift = -dp(0.6f) * (0.5f + 0.5f * breath);
 
-        // 地面阴影
-        paint.setColor(0x22000000);
-        oval.set(cx - r * 1.0f, cyFoot + dp(2), cx + r * 1.0f, cyFoot + dp(10));
-        c.drawOval(oval, paint);
+        // 柔和地面阴影（淡化脚下的硬边）
+        for (int si = 2; si >= 0; si--) {
+            paint.setColor(0x0C000000);
+            float k = 1f + si * 0.32f;
+            oval.set(cx - r * 0.85f * k, cyFoot - dp(1),
+                    cx + r * 0.85f * k, cyFoot + dp(7) + dp(3) * si);
+            c.drawOval(oval, paint);
+        }
 
         boolean gray = saturation < 0.999f;
         if (gray) {
@@ -1137,6 +1423,92 @@ public class PetView extends View {
         for (Particle p : particles) {
             drawParticle(c, p);
         }
+    }
+
+    /** 东北雨姐：真实立绘（透明 PNG，多个表情） */
+    private void drawYujie(Canvas c) {
+        int w = getWidth(), h = getHeight();
+        float cx = w / 2f;
+        float cyFoot = h * 0.97f;
+        float r = Math.min(w, h) * 0.30f;
+
+        // 地面阴影
+        paint.setColor(0x22000000);
+        oval.set(cx - r * 1.0f, cyFoot + dp(2), cx + r * 1.0f, cyFoot + dp(10));
+        c.drawOval(oval, paint);
+
+        // 冲击波
+        if (shockwave >= 0f) {
+            float sw = Math.min(1f, shockwave);
+            stroke.setShader(null);
+            stroke.setStyle(Paint.Style.STROKE);
+            stroke.setStrokeWidth(dp(6) * (1f - sw) + dp(1));
+            stroke.setColor(0xFFFF8A00);
+            stroke.setAlpha((int) (220 * (1f - sw)));
+            c.drawOval(new RectF(cx - r * (1f + 4.5f * sw), cyFoot - r * 0.35f * (1f + 1.5f * sw),
+                    cx + r * (1f + 4.5f * sw), cyFoot + r * 0.35f * (1f + 1.5f * sw)), stroke);
+            stroke.setAlpha(255);
+            stroke.setShader(null);
+        }
+
+        if (scareBmp != null) {
+            // 突然贴脸：放大到 1.75 倍 + 高频抖动
+            Paint sp = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            float bw, bh;
+            if (scareZoom > 1.5f) {
+                // 贴脸：放大溢出窗口
+                bw = w * scareZoom;
+                bh = bw * scareBmp.getHeight() / (float) scareBmp.getWidth();
+            } else {
+                // 其它恐怖形态：和正常一样 fit 在窗口内
+                float maxW = w * 0.96f, maxH = h * 0.98f;
+                float fit = Math.min(maxW / scareBmp.getWidth(), maxH / scareBmp.getHeight());
+                bw = scareBmp.getWidth() * fit;
+                bh = scareBmp.getHeight() * fit;
+            }
+            float sx0 = cx - bw / 2f + (rnd.nextFloat() - 0.5f) * dp(9);
+            float sy0 = h - bh + (rnd.nextFloat() - 0.5f) * dp(5);
+            if (scareInvert) {
+                sp.setColorFilter(new android.graphics.ColorMatrixColorFilter(
+                        new float[]{-1,0,0,0,255, 0,-1,0,0,255, 0,0,-1,0,255, 0,0,0,1,0}));
+            } else if (scareZoom > 1.5f) {
+                // 只有贴脸特写加高对比
+                sp.setColorFilter(new android.graphics.ColorMatrixColorFilter(
+                        new float[]{1.25f,0,0,0,10, 0,0.45f,0,0,-30, 0,0,0.45f,0,-30, 0,0,0,1,0}));
+            } else {
+                sp.setColorFilter(null);
+            }
+            c.drawBitmap(scareBmp, null, new RectF(sx0, sy0, sx0 + bw, sy0 + bh), sp);
+            return;
+        }
+        Bitmap bmp = yujieBmp();
+        if (bmp == null) return;
+
+        float bodyShift = -dp(0.6f) * (0.5f + 0.5f * breath);
+        float bodyScaleY = 1f + 0.015f * breath;
+
+        c.save();
+        c.translate(shakeX, offsetY + bodyShift + shakeY);
+        if (Math.abs(scale - 1f) > 0.001f) c.scale(scale, scale, cx, cyFoot);
+        if (Math.abs(rotation) > 0.01f) c.rotate(rotation, cx, cyFoot);
+        if (Math.abs(bodyScaleY - 1f) > 0.001f) c.scale(1f, bodyScaleY, cx, cyFoot);
+        if (jellyT > 0f) {
+            float amp = 0.22f * (1f - jellyT);
+            float wv = (float) Math.sin(jellyT * Math.PI * 6);
+            c.scale(1f + amp * wv, 1f - amp * wv, cx, cyFoot);
+        }
+
+        // 宽高双向 fit，保证整个模型都在窗口内（巨型也不裁头）
+        float maxW = w * 0.96f, maxH = h * 0.98f;
+        float fit = Math.min(maxW / bmp.getWidth(), maxH / bmp.getHeight());
+        float bw = bmp.getWidth() * fit;
+        float bh = bmp.getHeight() * fit;
+        float left = cx - bw / 2f;
+        float top = h - bh;
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        p.setAlpha(255);
+        c.drawBitmap(bmp, null, new RectF(left, top, left + bw, top + bh), p);
+        c.restore();
     }
 
     private void drawSprite(Canvas c) {
@@ -1275,6 +1647,28 @@ public class PetView extends View {
             paint.setColor(0xFFC98A4B);
             paint.setAlpha((int) (240 * a));
             c.drawCircle(p.x, p.y, p.size, paint);
+            paint.setAlpha(255);
+        } else if (p.kind == 11) {
+            paint.setShader(null);
+            paint.setColor(0xFFFF7A18);
+            paint.setAlpha((int) (235 * a));
+            c.drawCircle(p.x, p.y, p.size * (0.5f + 0.5f * a), paint);
+            paint.setColor(0xFFFFD24D);
+            paint.setAlpha((int) (200 * a));
+            c.drawCircle(p.x, p.y, p.size * 0.30f * a, paint);
+            paint.setAlpha(255);
+        } else if (p.kind == 12) {
+            paint.setShader(null);
+            paint.setColor(0xFFFFF3B0);
+            paint.setAlpha((int) (255 * a * a));
+            float sp = p.size * 0.30f;
+            path.reset();
+            path.moveTo(p.x - sp, p.y);
+            path.lineTo(p.x, p.y - sp * 0.5f);
+            path.lineTo(p.x + sp, p.y);
+            path.lineTo(p.x, p.y + sp * 0.5f);
+            path.close();
+            c.drawPath(path, paint);
             paint.setAlpha(255);
         } else if (p.kind == 9) {
             paint.setColor(0xFF3DF08A);

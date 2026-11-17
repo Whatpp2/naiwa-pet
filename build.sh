@@ -18,6 +18,7 @@ echo "== aapt2 link =="
 $QEMU -L /tmp/x86root "$BT/aapt2" link -o build/app-unsigned.apk \
   -I "$SDK/platforms/android-35/android.jar" \
   --manifest AndroidManifest.xml --java build/gen \
+  --min-sdk-version 21 --target-sdk-version 35 \
   -A assets \
   build/compiled/res.zip
 
@@ -29,7 +30,7 @@ echo "== javac =="
 
 echo "== d8 =="
 "$JDK/bin/java" -cp "$BT/lib/d8.jar" com.android.tools.r8.D8 \
-  --min-api 26 --lib "$SDK/platforms/android-35/android.jar" \
+  --min-api 21 --lib "$SDK/platforms/android-35/android.jar" \
   --output build/dex \
   $(find build/classes -name '*.class')
 

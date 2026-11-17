@@ -7,7 +7,7 @@ import android.graphics.RectF;
 import android.view.View;
 
 /**
- * 独立排泄物实体：便便 / 尿渍 / 白色液体，作为单独悬浮窗留在地面，可被任意奶蛙吃掉。
+ * 独立排泄物实体：便便 / 尿渍 / 白色液体，作为单独悬浮窗留在地面，可被任意p1吃掉。
  */
 public class DroppingView extends View {
 

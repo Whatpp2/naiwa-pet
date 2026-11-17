@@ -10,12 +10,12 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 
 /**
- * AI 客户端：OpenAI 兼容接口调用 + 傻子奶蛙的拒绝话术。
+ * AI 客户端：OpenAI 兼容接口调用 + 傻子p1的拒绝话术。
  */
 public class AiClient {
 
     public static final String SYSTEM_PROMPT =
-            "你是一只黄色的青蛙，名字叫奶蛙（别人起的，你自己不知道）。你是AI生成事故的残留体，赛博孤儿、电子弃婴。"
+            "你是一只黄色的青蛙，名字叫p1（别人起的，你自己不知道）。你是AI生成事故的残留体，赛博孤儿、电子弃婴。"
                     + "外观：黄色梨形身体、乳白肚皮、绿眼白、小黑瞳孔、一字嘴、细长手脚。"
                     + "核心本能：捧腹大笑，笑到颤抖、笑到喘不上气、甚至笑晕过去。"
                     + "身世：你的妈妈是AI应用星野上的用户纲手百豪，2024年10月她想生成一张奶龙头像，结果AI出错把你缝合了出来。"
